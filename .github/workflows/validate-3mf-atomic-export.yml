@@ -1,0 +1,72 @@
+name: Validate 3MF atomic exports
+on:
+  push:
+    branches: [validation/3mf-atomic-export-20261120]
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Afloat16/CLI-Anything
+          ref: 777911b50ede788dd1366b81dc345637d850d820
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test dependencies
+        run: |
+          python -m pip install -e "./3MF/agent-harness[dev]" networkx
+          python -c 'import sys, numpy, scipy, trimesh, pytest; print(sys.version); print(numpy.__version__, scipy.__version__, trimesh.__version__, pytest.__version__)'
+      - name: Verify baseline failures and restore exact source
+        run: |
+          mkdir -p validation-results
+          python - <<'PY'
+          import pathlib, subprocess, sys, xml.etree.ElementTree as ET
+          path = pathlib.Path("3MF/agent-harness/cli_anything/threemf/core/parser.py")
+          original = path.read_bytes()
+          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == "777911b50ede788dd1366b81dc345637d850d820"
+          path.write_bytes(subprocess.check_output(["git", "show", "34f519533bc175d2fe287ab8316b0dd99bb9cc43:" + path.as_posix()]))
+          try:
+              result = subprocess.run([sys.executable, "-m", "pytest", "3MF/agent-harness/cli_anything/threemf/tests/test_atomic_write.py", "-k", "failed_zip", "-q", "-ra", "--junitxml=validation-results/baseline.xml"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              pathlib.Path("validation-results/baseline.log").write_text(result.stdout)
+              print(result.stdout)
+              assert result.returncode == 1, result.returncode
+              cases = ET.parse("validation-results/baseline.xml").findall(".//testcase")
+              assert len(cases) == 6
+              assert sum(case.find("failure") is not None for case in cases) == 6
+          finally:
+              path.write_bytes(original)
+          PY
+      - name: Verify complete 3MF harness
+        run: |
+          python -m pytest 3MF/agent-harness/cli_anything/threemf/tests/ -q -ra --junitxml=validation-results/fixed.xml | tee validation-results/fixed.log
+          git diff --exit-code
+          git diff --check
+          python - <<'PY'
+          import json, pathlib
+          registry = json.loads(pathlib.Path("registry.json").read_text())
+          rows = registry["clis"] if isinstance(registry, dict) and "clis" in registry else registry
+          if isinstance(rows, dict):
+              print("Registry root keys:", sorted(rows))
+          else:
+              row = next(row for row in rows if row["name"] == "3mf")
+              assert row["version"] == "1.0.1"
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 3mf-atomic-${{ matrix.os }}-python-${{ matrix.python }}
+          path: validation-results/
