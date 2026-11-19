@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 42c23f53711972f0f7ee2cf7c45da9e09bc736bc
+          ref: 29df883cb160f5f618a46a1f07fad9fd8f5d0b13
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -37,7 +37,7 @@ jobs:
           import pathlib, subprocess, sys, xml.etree.ElementTree as ET
           path = pathlib.Path("3MF/agent-harness/cli_anything/threemf/core/parser.py")
           fixed = path.read_bytes()
-          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == "42c23f53711972f0f7ee2cf7c45da9e09bc736bc"
+          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == "29df883cb160f5f618a46a1f07fad9fd8f5d0b13"
           system = "windows" if sys.platform == "win32" else "darwin" if sys.platform == "darwin" else "linux"
           path.write_bytes(subprocess.check_output(["git", "show", "0627ffe370d8355b8ed8bbf2edab20493a6b43c3:" + path.as_posix()]))
           try:
