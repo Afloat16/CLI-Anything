@@ -1072,6 +1072,52 @@ class TestBlenderBackend:
         assert "Blender" in version
         print(f"\n  Blender version: {version}")
 
+    @pytest.mark.parametrize("names", [
+        ["Surface A", "Surface-A", "Surface.A"],
+        ["1", "_1"],
+        ["Red", "Blue"],
+    ])
+    def test_material_assignments_do_not_depend_on_sanitized_names(self, tmp_path, names):
+        from cli_anything.blender.utils.blender_backend import find_blender
+        from cli_anything.blender.utils.bpy_gen import _gen_materials, _gen_objects
+
+        project = create_scene()
+        expected = {}
+        for index, name in enumerate(names):
+            material = create_material(project, name=name)
+            material["id"] = 10 + index * 7
+            obj = add_object(project, name=f"Object{index}")
+            assign_material(project, index, index)
+            expected[obj["name"]] = name
+        add_object(project, name="Unassigned")
+        expected["Unassigned"] = None
+
+        project_path = str(tmp_path / "materials.json")
+        save_scene(project, project_path)
+        restored = open_scene(project_path)
+        script = "\n".join([
+            "import bpy",
+            "import math",
+            "bpy.ops.object.select_all(action='SELECT')",
+            "bpy.ops.object.delete(use_global=False)",
+            *_gen_materials(restored),
+            *_gen_objects(restored),
+            f"expected = {expected!r}",
+            "actual = {name: (bpy.data.objects[name].active_material.name "
+            "if bpy.data.objects[name].active_material else None) for name in expected}",
+            "assert actual == expected, (actual, expected)",
+            "print('MATERIAL_ASSIGNMENTS_VERIFIED')",
+        ])
+        script_path = tmp_path / "check_materials.py"
+        script_path.write_text(script, encoding="utf-8")
+        result = subprocess.run(
+            [find_blender(), "--background", "--python-exit-code", "1",
+             "--python", str(script_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "MATERIAL_ASSIGNMENTS_VERIFIED" in result.stdout
+
 
 class TestBlenderRenderE2E:
     """True E2E tests: generate scene → bpy script → blender --background → verify output."""

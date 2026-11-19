@@ -160,7 +160,7 @@ def _gen_materials(project: Dict[str, Any]) -> List[str]:
 
     lines = ["# ── Materials ───────────────────────────────────────────────"]
 
-    for mat in materials:
+    for index, mat in enumerate(materials):
         name = mat.get("name", "Material")
         color = mat.get("color", [0.8, 0.8, 0.8, 1.0])
         metallic = mat.get("metallic", 0.0)
@@ -170,7 +170,7 @@ def _gen_materials(project: Dict[str, Any]) -> List[str]:
         emission_strength = mat.get("emission_strength", 0.0)
         alpha = mat.get("alpha", 1.0)
 
-        var_name = _safe_var_name(name)
+        var_name = str(index)
         lines.extend([
             f"mat_{var_name} = bpy.data.materials.new(name='{name}')",
             f"mat_{var_name}.use_nodes = True",
@@ -200,7 +200,7 @@ def _gen_objects(project: Dict[str, Any]) -> List[str]:
 
     lines = ["# ── Objects ─────────────────────────────────────────────────"]
     materials = project.get("materials", [])
-    mat_id_to_name = {m["id"]: m["name"] for m in materials}
+    mat_id_to_var = {m["id"]: str(index) for index, m in enumerate(materials)}
 
     for i, obj in enumerate(objects):
         mesh_type = obj.get("mesh_type", "cube")
@@ -260,9 +260,8 @@ def _gen_objects(project: Dict[str, Any]) -> List[str]:
 
         # Assign material
         mat_id = obj.get("material")
-        if mat_id is not None and mat_id in mat_id_to_name:
-            mat_name = mat_id_to_name[mat_id]
-            var_name = _safe_var_name(mat_name)
+        if mat_id is not None and mat_id in mat_id_to_var:
+            var_name = mat_id_to_var[mat_id]
             lines.append(f"if 'mat_{var_name}' in dir():")
             lines.append(f"    obj.data.materials.append(mat_{var_name})")
 
