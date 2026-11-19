@@ -1,4 +1,4 @@
-name: Validate 3MF atomic exports
+name: Validate 3MF ownership and atomic exports
 on:
   push:
     branches: [validation/3mf-atomic-export-20261120]
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Afloat16/CLI-Anything
-          ref: 777911b50ede788dd1366b81dc345637d850d820
+          ref: 0627ffe370d8355b8ed8bbf2edab20493a6b43c3
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -37,7 +37,7 @@ jobs:
           import pathlib, subprocess, sys, xml.etree.ElementTree as ET
           path = pathlib.Path("3MF/agent-harness/cli_anything/threemf/core/parser.py")
           original = path.read_bytes()
-          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == "777911b50ede788dd1366b81dc345637d850d820"
+          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == "0627ffe370d8355b8ed8bbf2edab20493a6b43c3"
           path.write_bytes(subprocess.check_output(["git", "show", "34f519533bc175d2fe287ab8316b0dd99bb9cc43:" + path.as_posix()]))
           try:
               result = subprocess.run([sys.executable, "-m", "pytest", "3MF/agent-harness/cli_anything/threemf/tests/test_atomic_write.py", "-k", "failed_zip", "-q", "-ra", "--junitxml=validation-results/baseline.xml"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -50,13 +50,40 @@ jobs:
           finally:
               path.write_bytes(original)
           PY
+      - name: Verify ownership regression against previous PR head
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, sys, xml.etree.ElementTree as ET
+          if os.name != "posix":
+              print("POSIX group regression runs on the Linux matrix legs.")
+              sys.exit(0)
+          path = pathlib.Path("3MF/agent-harness/cli_anything/threemf/core/parser.py")
+          original = path.read_bytes()
+          print("Supplementary groups:", os.getgroups())
+          path.write_bytes(subprocess.check_output(["git", "show", "ae5fe02fb4057daca8ce47a73b23f262b98b1db4:" + path.as_posix()]))
+          try:
+              result = subprocess.run([sys.executable, "-m", "pytest", "3MF/agent-harness/cli_anything/threemf/tests/test_atomic_write.py", "-k", "shared_group or metadata_restore", "-q", "-ra", "--junitxml=validation-results/ownership-baseline.xml"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              pathlib.Path("validation-results/ownership-baseline.log").write_text(result.stdout)
+              print(result.stdout)
+              assert result.returncode == 1
+              cases = ET.parse("validation-results/ownership-baseline.xml").findall(".//testcase")
+              assert len(cases) == 4
+              assert sum(case.find("failure") is not None for case in cases) == 3
+              assert not any(case.find("skipped") is not None for case in cases)
+          finally:
+              path.write_bytes(original)
+          PY
       - name: Verify complete 3MF harness
         run: |
           python -m pytest 3MF/agent-harness/cli_anything/threemf/tests/ -q -ra --junitxml=validation-results/fixed.xml | tee validation-results/fixed.log
           git diff --exit-code
           git diff --check
           python - <<'PY'
-          import json, pathlib
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          if os.name == "posix":
+              cases = ET.parse("validation-results/fixed.xml").findall(".//testcase")
+              groups = [case for case in cases if "shared_group" in case.get("name", "")]
+              assert len(groups) == 2 and not any(case.find("skipped") is not None for case in groups)
           registry = json.loads(pathlib.Path("registry.json").read_text())
           rows = registry["clis"] if isinstance(registry, dict) and "clis" in registry else registry
           if isinstance(rows, dict):
