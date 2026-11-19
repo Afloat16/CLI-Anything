@@ -1,0 +1,116 @@
+name: Diagnose Windows ACL inheritance
+on:
+  push:
+    branches: [validation/3mf-windows-acl-diagnostics-20261120]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: github.repository == 'Afloat16/CLI-Anything'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 29df883cb160f5f618a46a1f07fad9fd8f5d0b13
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Compare native descriptor restoration behavior on owned scratch files
+        run: |
+          python - <<'PY'
+          import ctypes
+          import csv
+          import importlib.util
+          import pathlib
+          import subprocess
+          import tempfile
+          
+          path = pathlib.Path("3MF/agent-harness/cli_anything/threemf/core/access_permissions.py")
+          spec = importlib.util.spec_from_file_location("permissions", path)
+          permissions = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(permissions)
+          api, kernel = permissions._windows_api()
+          pointer, dword, boolean = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int32
+          api.SetNamedSecurityInfoW.argtypes = [ctypes.c_wchar_p, ctypes.c_int, dword, pointer, pointer, pointer, pointer]
+          api.SetNamedSecurityInfoW.restype = dword
+          api.SetSecurityDescriptorControl.argtypes = [pointer, ctypes.c_uint16, ctypes.c_uint16]
+          api.SetSecurityDescriptorControl.restype = boolean
+          api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [pointer, dword, dword, ctypes.POINTER(pointer), ctypes.POINTER(dword)]
+          api.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = boolean
+          
+          def descriptor(sddl):
+              result, size = pointer(), dword()
+              permissions._windows_checked(api.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(result), ctypes.byref(size)))
+              try:
+                  return ctypes.string_at(result, size.value)
+              finally:
+                  kernel.LocalFree(result)
+          
+          def sddl(contents):
+              result = pointer()
+              buf = ctypes.create_string_buffer(contents)
+              permissions._windows_checked(api.ConvertSecurityDescriptorToStringSecurityDescriptorW(buf, 1, 7, ctypes.byref(result), None))
+              try:
+                  return ctypes.wstring_at(result)
+              finally:
+                  kernel.LocalFree(result)
+          
+          def named(target, data, flags):
+              buf = ctypes.create_string_buffer(data)
+              present, defaulted, acl = boolean(), boolean(), pointer()
+              permissions._windows_checked(api.GetSecurityDescriptorDacl(buf, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted)))
+              error = api.SetNamedSecurityInfoW(str(target), 1, flags, None, None, acl, None)
+              if error:
+                  raise ctypes.WinError(error)
+          
+          sid = next(csv.reader(subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"], text=True).splitlines()))[-1]
+          with tempfile.TemporaryDirectory() as root:
+              root = pathlib.Path(root)
+              parent = root / "parent"
+              parent.mkdir()
+              named(parent, descriptor(f"D:P(D;OICI;0x20;;;{sid})(A;OICI;FA;;;{sid})"), 4 | 0x80000000)
+              source = parent / "source"
+              source.write_bytes(b"")
+              source_sd = permissions.read_access_acl(str(source))
+              expected = permissions._windows_acl_signature(source_sd)
+              print("SOURCE", sddl(source_sd), expected[:2])
+              private = parent / "private"
+              private.mkdir()
+              permissions.make_staging_private(str(private))
+              print("PRIVATE", sddl(permissions.read_access_acl(str(private))))
+              for label, flags, request, protect_first, modern in [
+                  ("legacy_unprotect", 4 | 0x20000000, False, False, False),
+                  ("legacy_plain", 4, False, False, False),
+                  ("legacy_request", 4 | 0x20000000, True, False, False),
+                  ("legacy_protected_first", 4 | 0x20000000, False, True, False),
+                  ("legacy_protected_request", 4 | 0x20000000, True, True, False),
+                  ("modern_unprotect", 4 | 0x20000000, False, False, True),
+                  ("modern_protected_first", 4 | 0x20000000, False, True, True),
+              ]:
+                  target = private / label
+                  target.write_bytes(b"")
+                  initial = permissions.read_access_acl(str(target))
+                  if protect_first:
+                      buf = ctypes.create_string_buffer(initial)
+                      permissions._windows_checked(api.SetSecurityDescriptorControl(buf, 0x1000, 0x1000))
+                      permissions._windows_checked(api.SetFileSecurityW(str(target), 4 | 0x80000000, buf))
+                  buf = ctypes.create_string_buffer(source_sd)
+                  if request:
+                      permissions._windows_checked(api.SetSecurityDescriptorControl(buf, 0x100, 0x100))
+                  try:
+                      if modern:
+                          named(target, buf.raw, flags)
+                      else:
+                          permissions._windows_checked(api.SetFileSecurityW(str(target), flags, buf))
+                      actual = permissions.read_access_acl(str(target))
+                      signature = permissions._windows_acl_signature(actual)
+                      print(label, "MATCH", signature == expected, "SDDL", sddl(actual), "CONTROL", signature[:2], "ACE_MATCH", signature[2] == expected[2], "IDENTITY_MATCH", signature[3:] == expected[3:])
+                  except OSError as error:
+                      print(label, "ERROR", repr(error))
+          
+          PY
