@@ -1,0 +1,108 @@
+name: Validate vectorized 3MF vertex remapping
+on:
+  push:
+    branches: [validation/3mf-vertex-group-remapping-20261119]
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            numpy: "1.24.4"
+          - python: "3.12"
+            numpy: "2.3.5"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Afloat16/CLI-Anything
+          ref: 9362797fb48d047ef342ef59269c53590f26bbc8
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the affected native harness
+        run: |
+          python -m pip install 'numpy==${{ matrix.numpy }}' 'scipy>=1.10,<1.16' 'trimesh==4.12.2' 'networkx<3.5' 'shapely==2.1.2' pytest -e 3MF/agent-harness
+          python --version
+          python -m pip freeze
+          test "$(git rev-parse HEAD)" = 9362797fb48d047ef342ef59269c53590f26bbc8
+      - name: Verify compatibility controls on the original implementation
+        run: |
+          git show 34f519533bc175d2fe287ab8316b0dd99bb9cc43:3MF/agent-harness/cli_anything/threemf/core/repair.py > 3MF/agent-harness/cli_anything/threemf/core/repair.py
+          python -m pytest 3MF/agent-harness/cli_anything/threemf/tests/test_vertex_remapping.py -v
+          git show HEAD:3MF/agent-harness/cli_anything/threemf/core/repair.py > 3MF/agent-harness/cli_anything/threemf/core/repair.py
+      - name: Run the complete affected suite and public CLI
+        run: |
+          python -m pytest 3MF/agent-harness/cli_anything/threemf/tests/ -v
+          python -m compileall -q 3MF/agent-harness/cli_anything/threemf
+          cli-anything-3mf --help
+          git diff --check
+          git diff --exit-code
+  comparison:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Afloat16/CLI-Anything
+          ref: 9362797fb48d047ef342ef59269c53590f26bbc8
+          path: fixed
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: HKUDS/CLI-Anything
+          ref: 34f519533bc175d2fe287ab8316b0dd99bb9cc43
+          path: base
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install NumPy and record host
+        run: |
+          python -m pip install numpy==2.3.5
+          python --version
+          lscpu
+      - name: Compare exact API outputs and five alternating timing rounds
+        run: |
+          mkdir measurements
+          python harness/validation/vertex_remapping_bench.py base 34f519533bc175d2fe287ab8316b0dd99bb9cc43 semantic > measurements/semantic-base.json
+          python harness/validation/vertex_remapping_bench.py fixed 9362797fb48d047ef342ef59269c53590f26bbc8 semantic > measurements/semantic-fixed.json
+          for round in 1 2 3 4 5; do
+            if (( round % 2 )); then
+              variants=(base fixed)
+            else
+              variants=(fixed base)
+            fi
+            for variant in "${variants[@]}"; do
+              if [[ "$variant" = base ]]; then
+                revision=34f519533bc175d2fe287ab8316b0dd99bb9cc43
+              else
+                revision=9362797fb48d047ef342ef59269c53590f26bbc8
+              fi
+              python harness/validation/vertex_remapping_bench.py "$variant" "$revision" timing > "measurements/timing-$variant-$round.json"
+            done
+          done
+          python harness/validation/vertex_remapping_bench.py base 34f519533bc175d2fe287ab8316b0dd99bb9cc43 allocation > measurements/allocation-base.json
+          python harness/validation/vertex_remapping_bench.py fixed 9362797fb48d047ef342ef59269c53590f26bbc8 allocation > measurements/allocation-fixed.json
+          python harness/validation/vertex_remapping_summary.py
+          git -C base diff --exit-code
+          git -C fixed diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: vertex-remapping-measurements-9362797
+          path: measurements/
+          retention-days: 14
